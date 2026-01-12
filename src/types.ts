@@ -66,6 +66,10 @@ export interface Env {
     GCP_SERVICE_ACCOUNT_24?: string;
     GCP_SERVICE_ACCOUNT_25?: string;
 
+    // OAuth Client Secrets
+    OAUTH_CLIENT_ID?: string;
+    OAUTH_CLIENT_SECRET?: string;
+
     // Feature flags
     ENABLE_REAL_THINKING?: string;
     STREAM_THINKING_AS_CONTENT?: string;

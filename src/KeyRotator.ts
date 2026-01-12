@@ -227,8 +227,8 @@ export class KeyRotator implements DurableObject {
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
                 body: new URLSearchParams({
-                    client_id: OAUTH_CLIENT_ID,
-                    client_secret: OAUTH_CLIENT_SECRET,
+                    client_id: this.env.OAUTH_CLIENT_ID || OAUTH_CLIENT_ID,
+                    client_secret: this.env.OAUTH_CLIENT_SECRET || OAUTH_CLIENT_SECRET,
                     refresh_token: refreshToken,
                     grant_type: "refresh_token",
                 }),
