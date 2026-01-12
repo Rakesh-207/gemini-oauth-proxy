@@ -106,9 +106,53 @@ export class KeyRotator implements DurableObject {
             return this.handleProxy(request);
         } else if (path === "/status") {
             return this.handleStatus();
+        } else if (path === "/diagnose") {
+            return this.handleDiagnose();
         }
 
         return new Response("Unknown endpoint", { status: 404 });
+    }
+
+    /**
+     * Diagnose OAuth configuration issues
+     */
+    private handleDiagnose(): Response {
+        const clientId = this.env.OAUTH_CLIENT_ID || OAUTH_CLIENT_ID;
+        const clientSecret = this.env.OAUTH_CLIENT_SECRET || OAUTH_CLIENT_SECRET;
+
+        const issues: string[] = [];
+
+        if (!clientId || clientId === "YOUR_CLIENT_ID") {
+            issues.push("OAUTH_CLIENT_ID is not configured or uses placeholder value");
+        }
+        if (!clientSecret || clientSecret === "YOUR_CLIENT_SECRET") {
+            issues.push("OAUTH_CLIENT_SECRET is not configured or uses placeholder value");
+        }
+        if (this.credentials.length === 0) {
+            issues.push("No GCP_SERVICE_ACCOUNT_* credentials loaded");
+        }
+
+        // Check if any credential has a valid refresh token format
+        const credentialIssues: string[] = [];
+        for (let i = 0; i < this.credentials.length; i++) {
+            const cred = this.credentials[i];
+            if (!cred.refresh_token) {
+                credentialIssues.push(`Account ${i + 1}: Missing refresh_token`);
+            }
+        }
+
+        return new Response(JSON.stringify({
+            status: issues.length === 0 ? "OK" : "ISSUES_DETECTED",
+            oauthConfigured: {
+                clientId: !!clientId && clientId !== "YOUR_CLIENT_ID",
+                clientSecret: !!clientSecret && clientSecret !== "YOUR_CLIENT_SECRET",
+            },
+            credentialsLoaded: this.credentials.length,
+            issues,
+            credentialIssues: credentialIssues.slice(0, 5), // Limit output
+        }, null, 2), {
+            headers: { "Content-Type": "application/json" }
+        });
     }
 
     /**
@@ -120,9 +164,10 @@ export class KeyRotator implements DurableObject {
 
         const result = await this.getValidToken(modelType);
 
-        if (!result) {
-            return new Response(JSON.stringify({ error: "All accounts rate-limited" }), {
-                status: 429,
+        if ("error" in result) {
+            const status = result.errorType === "all_token_refresh_failed" ? 500 : 429;
+            return new Response(JSON.stringify({ error: result.error, errorType: result.errorType }), {
+                status,
                 headers: { "Content-Type": "application/json" }
             });
         }
@@ -130,6 +175,7 @@ export class KeyRotator implements DurableObject {
         return new Response(JSON.stringify({
             token: result.token,
             accountIndex: result.accountIndex,
+            projectId: result.projectId,
         }), {
             headers: { "Content-Type": "application/json" }
         });
@@ -137,15 +183,19 @@ export class KeyRotator implements DurableObject {
 
     /**
      * Get a valid token, rotating if necessary
+     * Returns detailed error info when failing
      */
-    private async getValidToken(modelType: ModelType): Promise<{ token: string; accountIndex: number } | null> {
+    private async getValidToken(modelType: ModelType): Promise<{ token: string; accountIndex: number; projectId: string } | { error: string; errorType: "no_credentials" | "all_rate_limited" | "all_token_refresh_failed" }> {
         const now = Date.now();
         const totalAccounts = this.credentials.length;
 
         if (totalAccounts === 0) {
             console.error("No credentials loaded!");
-            return null;
+            return { error: "No credentials loaded", errorType: "no_credentials" };
         }
+
+        let rateLimitedCount = 0;
+        let tokenRefreshFailedCount = 0;
 
         // Try each account starting from current index
         for (let attempt = 0; attempt < totalAccounts; attempt++) {
@@ -156,6 +206,7 @@ export class KeyRotator implements DurableObject {
             if (rateLimit) {
                 const isLimited = modelType === "pro" ? rateLimit.proLimited : rateLimit.flashLimited;
                 if (isLimited && now < rateLimit.limitedUntil) {
+                    rateLimitedCount++;
                     continue; // Skip this account
                 }
                 // Clear expired rate limit
@@ -173,11 +224,26 @@ export class KeyRotator implements DurableObject {
                     // Fire-and-forget persistence
                     this.state.storage.put("currentIndex", this.currentIndex);
                 }
-                return { token, accountIndex: idx };
+                const projectId = this.credentials[idx].project_id || "";
+                return { token, accountIndex: idx, projectId };
+            } else {
+                tokenRefreshFailedCount++;
             }
         }
 
-        return null; // All accounts exhausted
+        // Determine the actual cause of failure
+        if (rateLimitedCount === totalAccounts) {
+            console.error(`All ${totalAccounts} accounts are rate-limited`);
+            return { error: "All accounts rate-limited", errorType: "all_rate_limited" };
+        } else if (tokenRefreshFailedCount > 0) {
+            console.error(`Token refresh failed for ${tokenRefreshFailedCount} accounts, ${rateLimitedCount} rate-limited`);
+            return {
+                error: `Token refresh failed for ${tokenRefreshFailedCount} accounts. Check OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET secrets.`,
+                errorType: "all_token_refresh_failed"
+            };
+        }
+
+        return { error: "All accounts exhausted", errorType: "all_rate_limited" };
     }
 
     /**
@@ -220,6 +286,19 @@ export class KeyRotator implements DurableObject {
      * Refresh an OAuth token
      */
     private async refreshToken(refreshToken: string): Promise<{ accessToken: string; expiryDate: number } | null> {
+        const clientId = this.env.OAUTH_CLIENT_ID || OAUTH_CLIENT_ID;
+        const clientSecret = this.env.OAUTH_CLIENT_SECRET || OAUTH_CLIENT_SECRET;
+
+        // Validate OAuth credentials are configured
+        if (!clientId || clientId === "YOUR_CLIENT_ID") {
+            console.error("OAUTH_CLIENT_ID is not configured! Set it as a Cloudflare secret.");
+            return null;
+        }
+        if (!clientSecret || clientSecret === "YOUR_CLIENT_SECRET") {
+            console.error("OAUTH_CLIENT_SECRET is not configured! Set it as a Cloudflare secret.");
+            return null;
+        }
+
         try {
             const response = await fetch(OAUTH_REFRESH_URL, {
                 method: "POST",
@@ -227,8 +306,8 @@ export class KeyRotator implements DurableObject {
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
                 body: new URLSearchParams({
-                    client_id: this.env.OAUTH_CLIENT_ID || OAUTH_CLIENT_ID,
-                    client_secret: this.env.OAUTH_CLIENT_SECRET || OAUTH_CLIENT_SECRET,
+                    client_id: clientId,
+                    client_secret: clientSecret,
                     refresh_token: refreshToken,
                     grant_type: "refresh_token",
                 }),
@@ -236,7 +315,7 @@ export class KeyRotator implements DurableObject {
 
             if (!response.ok) {
                 const error = await response.text();
-                console.error("Token refresh failed:", error);
+                console.error(`Token refresh failed (${response.status}):`, error);
                 return null;
             }
 
@@ -301,9 +380,10 @@ export class KeyRotator implements DurableObject {
 
         // Get valid token
         const tokenResult = await this.getValidToken(modelType);
-        if (!tokenResult) {
-            return new Response(JSON.stringify({ error: "All accounts rate-limited" }), {
-                status: 429,
+        if ("error" in tokenResult) {
+            const status = tokenResult.errorType === "all_token_refresh_failed" ? 500 : 429;
+            return new Response(JSON.stringify({ error: tokenResult.error, errorType: tokenResult.errorType }), {
+                status,
                 headers: { "Content-Type": "application/json" }
             });
         }
@@ -311,14 +391,18 @@ export class KeyRotator implements DurableObject {
         // Resolve model alias
         const actualModel = MODEL_ALIASES[modelId] || modelId;
 
-        // Build API URL
+        // Build API URL - add ?alt=sse for streaming
         const method = stream ? "streamGenerateContent" : "generateContent";
-        const apiUrl = `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:${method}`;
+        const apiUrl = stream
+            ? `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:${method}?alt=sse`
+            : `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:${method}`;
 
-        // Make request
+        // Build Code Assist API request format
+        // Format: { model, request: { contents, generationConfig, ... }, project }
         const geminiRequest = {
-            model: `models/${actualModel}`,
-            ...(requestBody as Record<string, unknown>),
+            model: actualModel,  // No "models/" prefix for Code Assist API
+            request: requestBody as Record<string, unknown>,
+            project: tokenResult.projectId,
         };
 
         try {
@@ -344,7 +428,7 @@ export class KeyRotator implements DurableObject {
 
                 // Retry once with new account
                 const retryToken = await this.getValidToken(modelType);
-                if (retryToken) {
+                if (!("error" in retryToken)) {
                     const retryResponse = await fetch(apiUrl, {
                         method: "POST",
                         headers: {
@@ -360,8 +444,9 @@ export class KeyRotator implements DurableObject {
                     });
                 }
 
-                return new Response(JSON.stringify({ error: "All accounts rate-limited after retry" }), {
-                    status: 429,
+                const retryError = retryToken as { error: string; errorType: string };
+                return new Response(JSON.stringify({ error: retryError.error, errorType: retryError.errorType }), {
+                    status: retryError.errorType === "all_token_refresh_failed" ? 500 : 429,
                     headers: { "Content-Type": "application/json" }
                 });
             }

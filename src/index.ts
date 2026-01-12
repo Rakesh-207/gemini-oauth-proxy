@@ -90,6 +90,17 @@ app.get("/v1/status", async (c) => {
     return c.json(status);
 });
 
+// Diagnose endpoint - helps identify OAuth configuration issues
+app.get("/v1/diagnose", async (c) => {
+    const id = c.env.KEY_ROTATOR.idFromName("main");
+    const stub = c.env.KEY_ROTATOR.get(id);
+
+    const diagnoseResponse = await stub.fetch(new Request("http://internal/diagnose"));
+    const diagnose = await diagnoseResponse.json();
+
+    return c.json(diagnose);
+});
+
 // Chat completions endpoint
 app.post("/v1/chat/completions", async (c) => {
     const body = await c.req.json<ChatCompletionRequest>();
@@ -330,7 +341,18 @@ async function handleNonStreamingRequest(
         return c.json({ error: error.error || "Proxy request failed" }, proxyResponse.status);
     }
 
+    // Code Assist API returns: { response: { candidates: [...], usageMetadata: {...} } }
     const geminiResponse = await proxyResponse.json() as {
+        response?: {
+            candidates?: Array<{
+                content?: { parts?: Array<{ text?: string }> };
+            }>;
+            usageMetadata?: {
+                promptTokenCount?: number;
+                candidatesTokenCount?: number;
+            };
+        };
+        // Fallback for direct format
         candidates?: Array<{
             content?: { parts?: Array<{ text?: string }> };
         }>;
@@ -340,10 +362,10 @@ async function handleNonStreamingRequest(
         };
     };
 
-    // Extract content
-    const candidates = geminiResponse.candidates || [];
+    // Extract content - try response.candidates first (Code Assist format), then direct candidates
+    const candidates = geminiResponse.response?.candidates || geminiResponse.candidates || [];
     const content = candidates[0]?.content?.parts?.[0]?.text || "";
-    const usage = geminiResponse.usageMetadata;
+    const usage = geminiResponse.response?.usageMetadata || geminiResponse.usageMetadata;
 
     return c.json({
         id: completionId,

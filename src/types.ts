@@ -15,6 +15,7 @@ export interface OAuth2Credentials {
     token_type: string;
     id_token: string;
     expiry_date: number;
+    project_id?: string;  // Required for Code Assist API
 }
 
 // --- Cached Token Interface ---
