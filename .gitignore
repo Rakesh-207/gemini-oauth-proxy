@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.wrangler/
+
+# Wrangler secrets
+.dev.vars
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# ==========================================
+# REFERENCE DIRECTORIES - Exclude from repo
+# ==========================================
+# Original repo used as reference
+temp_original_repo/
+
+# Downloaded worker backup
+downloaded-worker/
+
+# API rate limit handler reference
+gemini-api-ratelimit-handler/
+
+# Old instruction file (reference only)
+COMPREHENSIVE_INSTRUCTION.md

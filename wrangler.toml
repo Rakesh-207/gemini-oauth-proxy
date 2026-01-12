@@ -1,0 +1,27 @@
+name = "gemini-cli-worker-2"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# --- KV Namespaces ---
+[[kv_namespaces]]
+binding = "GEMINI_CLI_KV"
+id = "a107e98492e945bfabaaddd87234ac94"
+
+# --- Durable Objects ---
+[[durable_objects.bindings]]
+name = "KEY_ROTATOR"
+class_name = "KeyRotator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["KeyRotator"]
+
+# --- Observability ---
+[observability.logs]
+enabled = true
+
+# --- Local Development ---
+[dev]
+ip = "0.0.0.0"
+port = 8787
