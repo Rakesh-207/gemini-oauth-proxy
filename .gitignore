@@ -36,3 +36,4 @@ gemini-api-ratelimit-handler/
 
 # Old instruction file (reference only)
 COMPREHENSIVE_INSTRUCTION.md
+worker_logs.txt

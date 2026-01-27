@@ -108,6 +108,8 @@ export class KeyRotator implements DurableObject {
             return this.handleStatus();
         } else if (path === "/diagnose") {
             return this.handleDiagnose();
+        } else if (path === "/health-check") {
+            return this.handleHealthCheck();
         }
 
         return new Response("Unknown endpoint", { status: 404 });
@@ -150,6 +152,102 @@ export class KeyRotator implements DurableObject {
             credentialsLoaded: this.credentials.length,
             issues,
             credentialIssues: credentialIssues.slice(0, 5), // Limit output
+        }, null, 2), {
+            headers: { "Content-Type": "application/json" }
+        });
+    }
+
+    /**
+     * Health check - test each credential individually
+     */
+    private async handleHealthCheck(): Promise<Response> {
+        const results: Array<{
+            index: number;
+            projectId: string;
+            tokenRefresh: "ok" | "failed";
+            apiCall: "ok" | "failed" | "skipped";
+            error?: string;
+        }> = [];
+
+        for (let i = 0; i < this.credentials.length; i++) {
+            const cred = this.credentials[i];
+            const projectId = cred.project_id || "unknown";
+
+            // Try to refresh token
+            const token = await this.refreshToken(cred.refresh_token);
+
+            if (!token) {
+                results.push({
+                    index: i,
+                    projectId,
+                    tokenRefresh: "failed",
+                    apiCall: "skipped",
+                    error: "Token refresh failed"
+                });
+                continue;
+            }
+
+            // Try a minimal API call
+            const testModel = "gemini-3-flash-preview";
+            const testRequest = {
+                model: testModel,
+                request: {
+                    contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+                    generationConfig: { maxOutputTokens: 5 }
+                },
+                project: projectId,
+            };
+
+            try {
+                const response = await fetch(
+                    `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:generateContent`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": `Bearer ${token.accessToken}`,
+                        },
+                        body: JSON.stringify(testRequest),
+                    }
+                );
+
+                if (response.ok) {
+                    results.push({
+                        index: i,
+                        projectId,
+                        tokenRefresh: "ok",
+                        apiCall: "ok"
+                    });
+                } else {
+                    const errorBody = await response.text();
+                    results.push({
+                        index: i,
+                        projectId,
+                        tokenRefresh: "ok",
+                        apiCall: "failed",
+                        error: `HTTP ${response.status}: ${errorBody.slice(0, 200)}`
+                    });
+                }
+            } catch (e) {
+                results.push({
+                    index: i,
+                    projectId,
+                    tokenRefresh: "ok",
+                    apiCall: "failed",
+                    error: `Fetch error: ${String(e)}`
+                });
+            }
+        }
+
+        const working = results.filter(r => r.apiCall === "ok");
+        const failing = results.filter(r => r.apiCall !== "ok");
+
+        return new Response(JSON.stringify({
+            total: this.credentials.length,
+            working: working.length,
+            failing: failing.length,
+            workingAccounts: working.map(r => ({ index: r.index, projectId: r.projectId })),
+            failingAccounts: failing.map(r => ({ index: r.index, projectId: r.projectId, error: r.error })),
         }, null, 2), {
             headers: { "Content-Type": "application/json" }
         });
@@ -415,6 +513,9 @@ export class KeyRotator implements DurableObject {
                 body: JSON.stringify(geminiRequest),
             });
 
+            // Log which credential is being used
+            console.log(`[Proxy] Using account ${tokenResult.accountIndex}, project: ${tokenResult.projectId}, model: ${actualModel}`);
+
             // Handle rate limit
             if (response.status === 429 || response.status === 503) {
                 // Report rate limit and retry with next account
@@ -447,7 +548,11 @@ export class KeyRotator implements DurableObject {
                 const retryError = retryToken as { error: string; errorType: string };
                 return new Response(JSON.stringify({ error: retryError.error, errorType: retryError.errorType }), {
                     status: retryError.errorType === "all_token_refresh_failed" ? 500 : 429,
-                    headers: { "Content-Type": "application/json" }
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Account-Index": String(tokenResult.accountIndex),
+                        "X-Project-ID": tokenResult.projectId,
+                    }
                 });
             }
 
@@ -473,13 +578,18 @@ export class KeyRotator implements DurableObject {
                 }
             }
 
+            // Create response with debugging headers
+            const headers = new Headers(response.headers);
+            headers.set("X-Account-Index", String(tokenResult.accountIndex));
+            headers.set("X-Project-ID", tokenResult.projectId);
+
             return new Response(response.body, {
                 status: response.status,
-                headers: response.headers,
+                headers,
             });
         } catch (e) {
             console.error("Proxy error:", e);
-            return new Response(JSON.stringify({ error: "Proxy request failed" }), {
+            return new Response(JSON.stringify({ error: "Proxy request failed", details: String(e) }), {
                 status: 500,
                 headers: { "Content-Type": "application/json" }
             });

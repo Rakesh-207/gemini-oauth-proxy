@@ -101,6 +101,17 @@ app.get("/v1/diagnose", async (c) => {
     return c.json(diagnose);
 });
 
+// Health check endpoint - tests each credential individually
+app.get("/v1/health-check", async (c) => {
+    const id = c.env.KEY_ROTATOR.idFromName("main");
+    const stub = c.env.KEY_ROTATOR.get(id);
+
+    const response = await stub.fetch(new Request("http://internal/health-check"));
+    const result = await response.json();
+
+    return c.json(result);
+});
+
 // Chat completions endpoint
 app.post("/v1/chat/completions", async (c) => {
     const body = await c.req.json<ChatCompletionRequest>();
@@ -336,9 +347,17 @@ async function handleNonStreamingRequest(
         }),
     }));
 
+    // Get account info from response headers for debugging
+    const accountIndex = proxyResponse.headers.get("X-Account-Index") || "unknown";
+    const projectId = proxyResponse.headers.get("X-Project-ID") || "unknown";
+
     if (!proxyResponse.ok) {
-        const error = await proxyResponse.json() as { error: string };
-        return c.json({ error: error.error || "Proxy request failed" }, proxyResponse.status);
+        const error = await proxyResponse.json() as { error: unknown };
+        // Include account info in error response for debugging
+        return c.json({
+            error: error.error || "Proxy request failed",
+            _debug: { accountIndex, projectId }
+        }, proxyResponse.status);
     }
 
     // Code Assist API returns: { response: { candidates: [...], usageMetadata: {...} } }
@@ -384,7 +403,8 @@ async function handleNonStreamingRequest(
             prompt_tokens: usage.promptTokenCount || 0,
             completion_tokens: usage.candidatesTokenCount || 0,
             total_tokens: (usage.promptTokenCount || 0) + (usage.candidatesTokenCount || 0)
-        } : undefined
+        } : undefined,
+        _debug: { accountIndex, projectId }
     });
 }
 
